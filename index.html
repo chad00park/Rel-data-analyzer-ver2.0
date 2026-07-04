@@ -16,22 +16,18 @@
   }
 </style>
 
-<!-- 외부 라이브러리들을 순서대로, 안전하게 로드합니다 (defer 추가) -->
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<!-- Recharts 에러 방지를 위해 더 안정적인 UMD 주소로 변경 -->
-<script defer src="https://unpkg.com/recharts/umd/Recharts.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-
+<!-- defer를 빼고 순서대로 확실하게 로드되도록 변경 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
 
-<!-- 데이터가 모두 로드된 후 Babel이 실행되도록 지연 실행 설정 -->
+<!-- 불필요한 대기 로직을 지우고 바로 실행되게 수정 -->
 <script type="text/babel">
-// 라이브러리 로딩 대기를 위한 안전장치 추가
-window.addEventListener('load', () => {
   const { useState, useCallback, useRef, useMemo, useEffect } = React;
   const { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
 
@@ -423,7 +419,7 @@ window.addEventListener('load', () => {
             📊 ReadOut Report Analyzer
           </h1>
 
-          /* ── ① 업로드 ── */
+          {/* ① 업로드 */}
           <Section title="① 데이터 업로드">
             <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv" onChange={handleFileUpload} style={{ display: "none" }} />
             <button className="no-print" onClick={() => fileInputRef.current?.click()} style={{ padding: "12px 28px", background: "#1565C0", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "15px" }}>
@@ -443,7 +439,7 @@ window.addEventListener('load', () => {
             )}
           </Section>
 
-          /* ── ② Parameter 선택 ── */
+          {/* ② Parameter 선택 */}
           {stage === "select" && (
             <Section title="② Parameter 선택">
               <label style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px", cursor: "pointer", fontWeight: 600, fontSize: "14px" }}>
@@ -470,17 +466,17 @@ window.addEventListener('load', () => {
             </Section>
           )}
 
-          /* ── ③ 차트 ── */
+          {/* ③ 차트 */}
           {stage === "charts" && (
             <div>
-              /* 컨트롤바 */
+              {/* 컨트롤바 */}
               <div className="no-print" style={{ background: "white", borderRadius: "12px", padding: "14px 20px", marginBottom: "16px", boxShadow: "0 2px 8px rgba(0,0,0,0.07)", display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
                 <button onClick={doUndo} disabled={!undoStack.length} style={{ ...btnStyle(undoStack.length ? "#E65100" : "#ccc"), cursor: undoStack.length ? "pointer" : "default" }}>↩ 되돌리기</button>
                 <button onClick={() => setStage("select")} style={btnStyle("#546E7A")}>← Parameter 재선택</button>
                 <span style={{ fontSize: "11px", color: "#999" }}>점 클릭 → 색 변경/삭제 | 이상점 클릭 → 삭제 | 되돌리기로 복원 가능</span>
               </div>
 
-              /* Line Charts */
+              {/* Line Charts */}
               <Section title="📈 Line Charts">
                 {selectedParams.map(param => {
                   const chartData = buildChartData(param);
@@ -489,7 +485,7 @@ window.addEventListener('load', () => {
                   const r = yAxisRanges[param] || {};
                   return (
                     <div key={param} className="chart-block" style={{ marginBottom: "28px", paddingBottom: "24px", borderBottom: "1px solid #f0f0f0" }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyYontent: "space-between", flexWrap: "wrap", gap: "8px", marginBottom: "6px" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", marginBottom: "6px" }}>
                         <strong style={{ fontSize: "13.5px", color: "#222" }}>{param}{unit ? ` [${unit}]` : ""}</strong>
                         <div className="no-print" style={{ display: "flex", gap: "6px", alignItems: "center", fontSize: "12px" }}>
                           <span style={{ color: "#666" }}>Y축:</span>
@@ -545,7 +541,7 @@ window.addEventListener('load', () => {
                 })}
               </Section>
 
-              /* Box Plots */
+              {/* Box Plots */}
               <Section title="📦 Box Plots">
                 {selectedParams.map(param => {
                   const unit = getParamUnit(param);
@@ -563,7 +559,7 @@ window.addEventListener('load', () => {
                 })}
               </Section>
 
-              /* PDF 저장 */
+              {/* PDF 저장 */}
               <div className="no-print" style={{ textAlign: "center", padding: "24px 0 12px" }}>
                 <button onClick={() => window.print()} style={{ padding: "16px 52px", background: "#B71C1C", color: "white", border: "none", borderRadius: "10px", cursor: "pointer", fontSize: "17px", boxShadow: "0 6px 20px rgba(183,28,28,0.35)" }}>
                   📄 PDF로 저장
@@ -578,7 +574,6 @@ window.addEventListener('load', () => {
   }
 
   ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-});
 </script>
 </body>
 </html>
