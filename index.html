@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ReadOut Report Analyzer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #eef0f4; min-height: 100vh; }
+  button:hover { opacity: 0.88; }
+  table { border-collapse: collapse; }
+  @media print {
+    body { background: white !important; }
+    .no-print { display: none !important; }
+    .chart-block { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React + Babel -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<!-- SheetJS (xlsx 파싱) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Recharts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.7.2/Recharts.js"></script>
+
+<script type="text/babel">
+const { useState, useCallback, useRef, useMemo, useEffect } = React;
+const { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+
+/* ─── 색상 팔레트 ─── */
+const FILE_COLORS = [
+  "#2196F3","#F44336","#4CAF50","#FF9800","#9C27B0",
+  "#00BCD4","#795548","#E91E63","#FF5722","#3F51B5",
+  "#009688","#FFC107","#8BC34A","#673AB7","#03A9F4",
+  "#CDDC39","#607D8B","#FF6F00","#1B5E20","#B71C1C"
+];
+const PALETTE = [
+  "#F44336","#E91E63","#9C27B0","#673AB7","#3F51B5",
+  "#2196F3","#03A9F4","#00BCD4","#009688","#4CAF50",
+  "#8BC34A","#CDDC39","#FFC107","#FF9800","#FF5722",
+  "#795548","#607D8B","#9E9E9E","#000000","#FFFFFF"
+];
+
+/* ─── 헬퍼 함수 ─── */
+function parseTimepoint(name) {
+  const m = name.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+function fmt(v, d = 3) {
+  if (v === null || v === undefined || (typeof v === "number" && isNaN(v))) return "–";
+  return typeof v === "number" ? v.toFixed(d) : String(v);
+}
+function calcBoxStats(values) {
+  if (!values || values.length === 0) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const n = s.length;
+  const q1 = s[Math.floor(n * 0.25)];
+  const q3 = s[Math.floor(n * 0.75)];
+  const median = n % 2 === 0 ? (s[n/2-1] + s[n/2]) / 2 : s[Math.floor(n/2)];
+  const iqr = q3 - q1;
+  const wLow = s.find(v => v >= q1 - 1.5 * iqr) ?? s[0];
+  const wHigh = [...s].reverse().find(v => v <= q3 + 1.5 * iqr) ?? s[n-1];
+  const outliers = s.filter(v => v < wLow || v > wHigh);
+  const avg = s.reduce((a, b) => a + b, 0) / n;
+  const stddev = Math.sqrt(s.reduce((a, b) => a + (b - avg) ** 2, 0) / n);
+  return { q1, q3, median, wLow, wHigh, outliers, avg, stddev, min: s[0], max: s[n-1], n };
+}
+
+/* ─── Box Plot SVG ─── */
+function MultiBoxPlot({ files, param, getBoxValues, onDeleteOutlier }) {
+  const n = files.length;
+  const svgW = Math.max(560, n * 90 + 100);
+  const svgH = 210;
+  const pL = 58, pR = 20, pT = 14, pB = 30;
+  const plotW = svgW - pL - pR;
+  const plotH = svgH - pT - pB;
+
+  const allStats = files.map((f, fi) => ({
+    stats: calcBoxStats(getBoxValues(fi, param)), fi, name: f.name
+  }));
+
+  let gMin = Infinity, gMax = -Infinity;
+  allStats.forEach(({ stats }) => {
+    if (!stats) return;
+    [stats.wLow, stats.wHigh, ...stats.outliers].forEach(v => {
+      gMin = Math.min(gMin, v); gMax = Math.max(gMax, v);
+    });
+  });
+  if (gMin === Infinity) { gMin = 0; gMax = 1; }
+  const gRange = gMax - gMin || 1;
+  const yPad = gRange * 0.12;
+  const yMin = gMin - yPad, yMax = gMax + yPad;
+  const yRange = yMax - yMin;
+  const toY = v => pT + plotH - ((v - yMin) / yRange) * plotH;
+  const colW = plotW / n;
+  const bxW = Math.min(44, colW * 0.55);
+  const cxOf = fi => pL + (fi + 0.5) * colW;
+  const bxOf = fi => cxOf(fi) - bxW / 2;
+  const yTicks = Array.from({ length: 6 }, (_, i) => yMin + (yRange / 5) * i);
+
+  return (
+    <svg width={svgW} height={svgH} style={{ overflow: "visible", display: "block" }}>
+      <line x1={pL} y1={pT} x2={pL} y2={pT+plotH} stroke="#aaa" />
+      <line x1={pL} y1={pT+plotH} x2={pL+plotW} y2={pT+plotH} stroke="#aaa" />
+      {yTicks.map((v, i) => (
+        <g key={i}>
+          <line x1={pL-4} y1={toY(v)} x2={pL} y2={toY(v)} stroke="#aaa" />
+          <text x={pL-7} y={toY(v)+3.5} textAnchor="end" fontSize={8.5} fill="#666">{v.toFixed(2)}</text>
+        </g>
+      ))}
+      {allStats.map(({ stats, fi, name }) => {
+        const color = FILE_COLORS[fi % FILE_COLORS.length];
+        const cx = cxOf(fi), bx = bxOf(fi);
+        if (!stats) return (
+          <text key={fi} x={cx} y={pT+plotH/2} textAnchor="middle" fontSize={8} fill="#ccc">N/A</text>
+        );
+        return (
+          <g key={fi}>
+            <line x1={cx} y1={toY(stats.wLow)} x2={cx} y2={toY(stats.q1)} stroke={color} strokeWidth={1.5} />
+            <line x1={cx} y1={toY(stats.q3)} x2={cx} y2={toY(stats.wHigh)} stroke={color} strokeWidth={1.5} />
+            <line x1={bx+bxW*0.1} y1={toY(stats.wLow)} x2={bx+bxW*0.9} y2={toY(stats.wLow)} stroke={color} strokeWidth={1.5} />
+            <line x1={bx+bxW*0.1} y1={toY(stats.wHigh)} x2={bx+bxW*0.9} y2={toY(stats.wHigh)} stroke={color} strokeWidth={1.5} />
+            <rect x={bx} y={toY(stats.q3)} width={bxW}
+              height={Math.max(1, Math.abs(toY(stats.q1) - toY(stats.q3)))}
+              fill={color + "30"} stroke={color} strokeWidth={1.5} />
+            <line x1={bx} y1={toY(stats.median)} x2={bx+bxW} y2={toY(stats.median)} stroke={color} strokeWidth={2.5} />
+            {stats.outliers.map((v, oi) => (
+              <circle key={oi} cx={cx} cy={toY(v)} r={3.5}
+                fill="white" stroke={color} strokeWidth={1.5}
+                style={{ cursor: "pointer" }}
+                onClick={() => onDeleteOutlier(fi, param, v)}>
+                <title>{`이상점: ${v}\n클릭하여 삭제`}</title>
+              </circle>
+            ))}
+            <text x={cx} y={pT+plotH+16} textAnchor="middle" fontSize={8} fill={color} fontWeight="bold">
+              {name.length > 11 ? name.slice(0, 10) + "…" : name}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ─── 통계 테이블 ─── */
+function StatsTable({ files, param, getBoxValues }) {
+  const stats = files.map((f, fi) => calcBoxStats(getBoxValues(fi, param)));
+  const TH = { padding: "4px 10px", border: "1px solid #ddd", textAlign: "center", fontWeight: 600 };
+  const TD = { padding: "3px 10px", border: "1px solid #ddd", textAlign: "center", fontSize: "10.5px" };
+  const rows = [
+    ["Min", s => fmt(s?.min)],
+    ["Max", s => fmt(s?.max)],
+    ["AVG", s => fmt(s?.avg)],
+    ["s/s", s => s?.n ?? "–"],
+    ["STDdev", s => fmt(s?.stddev)],
+  ];
+  return (
+    <div style={{ overflowX: "auto", marginTop: "8px" }}>
+      <table style={{ borderCollapse: "collapse", fontSize: "10.5px", width: "100%", minWidth: "400px" }}>
+        <thead>
+          <tr style={{ background: "#f5f5f5" }}>
+            <th style={TH}>항목</th>
+            {files.map((f, fi) => <th key={fi} style={{ ...TH, color: FILE_COLORS[fi % FILE_COLORS.length] }}>{f.name}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, fn]) => (
+            <tr key={label}>
+              <td style={{ ...TD, fontWeight: "bold", background: "#fafafa", color: "#555" }}>{label}</td>
+              {stats.map((s, i) => <td key={i} style={TD}>{fn(s)}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ─── Section 래퍼 ─── */
+function Section({ title, children }) {
+  return (
+    <div style={{ background: "white", borderRadius: "12px", padding: "22px 24px", marginBottom: "20px", boxShadow: "0 2px 8px rgba(0,0,0,0.07)" }}>
+      <h2 style={{ margin: "0 0 16px", color: "#1a237e", fontSize: "17px", fontWeight: 700 }}>{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+/* ─── 팝업 ─── */
+function Popup({ msg, onOk, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.48)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
+      <div style={{ background: "white", padding: "32px 44px", borderRadius: "16px", textAlign: "center", minWidth: "300px", maxWidth: "440px", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+        {msg && <p style={{ fontSize: "16px", color: "#333", marginBottom: (onOk || children) ? "22px" : 0, lineHeight: 1.7, whiteSpace: "pre-line" }}>{msg}</p>}
+        {children}
+        {onOk && <button onClick={onOk} style={{ padding: "10px 40px", background: "#1565C0", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "15px" }}>확인</button>}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════ 메인 앱 ════════════ */
+function App() {
+  const [files, setFiles] = useState([]);
+  const [popup, setPopup] = useState(null);
+  const [stage, setStage] = useState("upload");
+  const [selectedParams, setSelectedParams] = useState([]);
+  const [deletedPoints, setDeletedPoints] = useState({});
+  const [pointColors, setPointColors] = useState({});
+  const [yAxisRanges, setYAxisRanges] = useState({});
+  const [undoStack, setUndoStack] = useState([]);
+  const [ctxMenu, setCtxMenu] = useState(null);
+  const [showPalette, setShowPalette] = useState(false);
+  const [delDlg, setDelDlg] = useState(null);
+  const fileInputRef = useRef();
+
+  /* 파라미터 목록 (union) */
+  const allParams = useMemo(() => {
+    const set = new Set();
+    files.forEach(f => f.params.forEach(p => set.add(p)));
+    return Array.from(set);
+  }, [files]);
+
+  /* Unit ID 목록 (union) */
+  const allUnitIds = useMemo(() => {
+    const seen = new Set(), arr = [];
+    files.forEach(f => f.units.forEach(u => { if (!seen.has(u)) { seen.add(u); arr.push(u); } }));
+    return arr;
+  }, [files]);
+
+  /* 파일 파싱 */
+  const parseFile = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const isCSV = /\.csv$/i.test(file.name);
+        let rows;
+        if (isCSV) {
+          const text = new TextDecoder().decode(new Uint8Array(e.target.result));
+          rows = text.split(/\r?\n/).filter(l => l.trim()).map(l => l.split(",").map(v => v.trim()));
+        } else {
+          const wb = XLSX.read(new Uint8Array(e.target.result), { type: "array" });
+          rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+        }
+        if (rows.length < 3) throw new Error("데이터가 3행 미만입니다");
+        const params = rows[0].slice(1).map(v => String(v ?? "").trim()).filter(Boolean);
+        const units = rows[1].slice(1).map(v => String(v ?? "").trim());
+        const paramUnits = Object.fromEntries(params.map((p, i) => [p, units[i] ?? ""]));
+        const dataRows = rows.slice(2).filter(r => r[0] !== undefined && r[0] !== "");
+        const unitIds = dataRows.map(r => String(r[0] ?? "").trim());
+        const data = {};
+        dataRows.forEach((row, ri) => {
+          const uid = unitIds[ri];
+          data[uid] = {};
+          params.forEach((p, pi) => {
+            const v = row[pi + 1];
+            data[uid][p] = (v !== undefined && v !== null && v !== "") ? Number(v) : null;
+          });
+        });
+        resolve({ name: file.name.replace(/\.(xlsx?|csv)$/i, ""), params, paramUnits, units: unitIds, data });
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+
+  /* 파일 업로드 */
+  const handleFileUpload = async (e) => {
+    const uploaded = Array.from(e.target.files);
+    e.target.value = "";
+    if (!uploaded.length) return;
+    if (uploaded.length > 20) {
+      setPopup({ msg: "파일은 20개 이하이어야 합니다", onOk: () => setPopup(null) });
+      return;
+    }
+    setPopup({ msg: "분석 준비 중..." });
+    try {
+      let parsed = await Promise.all(uploaded.map(parseFile));
+      parsed.sort((a, b) => parseTimepoint(a.name) - parseTimepoint(b.name));
+      const maxS = Math.max(...parsed.map(f => f.units.length));
+      if (maxS > 500) { setPopup({ msg: "시료수가 너무 많습니다.\n500개 이하만 가능합니다", onOk: () => setPopup(null) }); return; }
+      const maxP = Math.max(...parsed.map(f => f.params.length));
+      if (maxP > 100) { setPopup({ msg: "parameter가 너무 많습니다.\n100개 이하이어야 합니다", onOk: () => setPopup(null) }); return; }
+      setFiles(parsed);
+      setSelectedParams([]); setDeletedPoints({}); setPointColors({});
+      setYAxisRanges({}); setUndoStack([]);
+      setPopup({ msg: "분석하고자 하는 parameter를 선택하세요", onOk: () => { setPopup(null); setStage("select"); } });
+    } catch (err) {
+      setPopup({ msg: "파일 오류: " + err.message, onOk: () => setPopup(null) });
+    }
+  };
+
+  const getParamUnit = useCallback(p => { for (const f of files) if (f.paramUnits?.[p]) return f.paramUnits[p]; return ""; }, [files]);
+  const isDeleted = useCallback((fi, uid) => !!deletedPoints[`${fi}-${uid}`], [deletedPoints]);
+
+  const getBoxValues = useCallback((fi, param) => {
+    const f = files[fi]; if (!f) return [];
+    return f.units
+      .filter(uid => !isDeleted(fi, uid) && f.data[uid]?.[param] !== null && f.data[uid]?.[param] !== undefined)
+      .map(uid => f.data[uid][param]);
+  }, [files, isDeleted]);
+
+  const buildChartData = useCallback((param) => {
+    return allUnitIds.map(uid => {
+      const pt = { unit: uid };
+      files.forEach((f, fi) => {
+        if (!isDeleted(fi, uid) && f.data[uid] !== undefined && f.data[uid][param] !== null)
+          pt[`f${fi}`] = f.data[uid][param];
+      });
+      return pt;
+    });
+  }, [allUnitIds, files, isDeleted]);
+
+  const doDelete = useCallback((fi, uid, deleteAxis) => {
+    const key = `${fi}-${uid}`;
+    setUndoStack(s => [...s, { action: "restore", key }]);
+    setDeletedPoints(d => ({ ...d, [key]: { deleteAxis } }));
+  }, []);
+
+  const doUndo = () => {
+    if (!undoStack.length) return;
+    const last = undoStack[undoStack.length - 1];
+    setUndoStack(s => s.slice(0, -1));
+    if (last.action === "restore") setDeletedPoints(d => { const n = { ...d }; delete n[last.key]; return n; });
+    if (last.action === "color") setPointColors(c => { const n = { ...c }; if (last.prev) n[last.key] = last.prev; else delete n[last.key]; return n; });
+  };
+
+  const changeColor = (fi, uid, color) => {
+    const key = `${fi}-${uid}`;
+    setUndoStack(s => [...s, { action: "color", key, prev: pointColors[key] }]);
+    setPointColors(c => ({ ...c, [key]: color }));
+    setCtxMenu(null); setShowPalette(false);
+  };
+
+  const handleDeleteOutlier = (fi, param, value) => {
+    const f = files[fi];
+    const uid = f?.units.find(u => !isDeleted(fi, u) && f.data[u]?.[param] === value);
+    if (uid) setDelDlg({ fi, uid, param, value });
+  };
+
+  const getYDomain = (param, data) => {
+    const r = yAxisRanges[param];
+    if (r?.custom) return [r.min, r.max];
+    let mn = Infinity, mx = -Infinity;
+    data.forEach(pt => files.forEach((_, fi) => {
+      const v = pt[`f${fi}`];
+      if (v !== undefined && v !== null) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
+    }));
+    if (mn === Infinity) return ["auto", "auto"];
+    const p = (mx - mn) * 0.1 || Math.abs(mn) * 0.1 || 1;
+    return [mn - p, mx + p];
+  };
+
+  const handleAnalyze = () => {
+    if (!selectedParams.length) { setPopup({ msg: "parameter를 선택해주세요", onOk: () => setPopup(null) }); return; }
+    setStage("charts");
+    setTimeout(() => setPopup({ msg: "데이터 분석이 완료되었습니다", onOk: () => setPopup(null) }), 350);
+  };
+
+  useEffect(() => {
+    const close = () => { setCtxMenu(null); setShowPalette(false); };
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, []);
+
+  /* ── 버튼 스타일 ── */
+  const btnStyle = (bg) => ({ padding: "8px 18px", background: bg, color: "white", border: "none", borderRadius: "7px", cursor: "pointer", fontSize: "13px" });
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#eef0f4" }}>
+      {/* 팝업 */}
+      {popup && <Popup msg={popup.msg} onOk={popup.onOk} />}
+
+      {/* 컨텍스트 메뉴 */}
+      {ctxMenu && (
+        <div onClick={e => e.stopPropagation()} style={{ position: "fixed", top: ctxMenu.y, left: ctxMenu.x, background: "white", border: "1px solid #e0e0e0", borderRadius: "10px", padding: "8px 6px", zIndex: 8000, boxShadow: "0 8px 24px rgba(0,0,0,0.15)", minWidth: "150px" }}>
+          <div style={{ fontSize: "11px", color: "#aaa", padding: "2px 10px 6px", borderBottom: "1px solid #eee" }}>Unit: {ctxMenu.uid}</div>
+          {[
+            ["🎨 색 변경", () => setShowPalette(v => !v)],
+            ["🗑️ 삭제", () => { setDelDlg({ fi: ctxMenu.fi, uid: ctxMenu.uid }); setCtxMenu(null); }],
+            ["✕ 취소", () => setCtxMenu(null)]
+          ].map(([label, fn]) => (
+            <button key={label} onClick={fn} style={{ display: "block", width: "100%", padding: "7px 12px", background: "none", border: "none", textAlign: "left", cursor: "pointer", fontSize: "13px", borderRadius: "6px", color: label.includes("취소") ? "#aaa" : "#333" }}>{label}</button>
+          ))}
+          {showPalette && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "6px 10px", width: "132px" }}>
+              {PALETTE.map(c => (
+                <div key={c} onClick={() => changeColor(ctxMenu.fi, ctxMenu.uid, c)}
+                  style={{ width: "20px", height: "20px", background: c, borderRadius: "50%", cursor: "pointer", border: "2px solid #ccc" }} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 삭제 다이얼로그 */}
+      {delDlg && (
+        <Popup>
+          <p style={{ fontSize: "15px", fontWeight: 600, marginBottom: "8px" }}>데이터 삭제</p>
+          <p style={{ fontSize: "13px", color: "#555", marginBottom: "6px" }}>
+            <strong>Unit {delDlg.uid}</strong>의 데이터를 삭제합니다.
+            {delDlg.value !== undefined && <><br />이상점 값: <strong>{delDlg.value}</strong></>}
+          </p>
+          <p style={{ fontSize: "13px", color: "#555", marginBottom: "20px" }}>X축 Unit 번호도 함께 삭제할까요?</p>
+          <div style={{ display: "flex", gap: "8px", justifyContent: "center", flexWrap: "wrap" }}>
+            <button onClick={() => { doDelete(delDlg.fi, delDlg.uid, false); setDelDlg(null); }} style={{ ...btnStyle("#FB8C00"), fontSize: "12px" }}>데이터만 삭제</button>
+            <button onClick={() => { doDelete(delDlg.fi, delDlg.uid, true); setDelDlg(null); }} style={{ ...btnStyle("#E53935"), fontSize: "12px" }}>Unit 번호도 삭제</button>
+            <button onClick={() => setDelDlg(null)} style={{ ...btnStyle("#9E9E9E"), fontSize: "12px" }}>취소</button>
+          </div>
+        </Popup>
+      )}
+
+      <div style={{ maxWidth: "1500px", margin: "0 auto", padding: "24px" }}>
+        <h1 style={{ textAlign: "center", color: "#0d1b6e", fontSize: "26px", marginBottom: "24px", fontWeight: 700 }}>
+          📊 ReadOut Report Analyzer
+        </h1>
+
+        {/* ── ① 업로드 ── */}
+        <Section title="① 데이터 업로드">
+          <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv" onChange={handleFileUpload} style={{ display: "none" }} />
+          <button className="no-print" onClick={() => fileInputRef.current?.click()} style={{ padding: "12px 28px", background: "#1565C0", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "15px" }}>
+            📁 파일 선택 (Excel / CSV)
+          </button>
+          <p style={{ fontSize: "12px", color: "#999", marginTop: "8px" }}>여러 파일 동시 선택 가능 (최대 20개) · 파일명에 시간/사이클 정보 포함 필요</p>
+          {files.length > 0 && (
+            <div style={{ marginTop: "12px", padding: "10px 14px", background: "#E3F2FD", borderRadius: "8px", fontSize: "13px", lineHeight: 1.8 }}>
+              <strong>{files.length}개 파일 (시간순):</strong><br />
+              {files.map((f, fi) => (
+                <span key={fi}>
+                  <span style={{ color: FILE_COLORS[fi % FILE_COLORS.length], fontWeight: 600 }}>{f.name}</span>
+                  {fi < files.length - 1 ? " → " : ""}
+                </span>
+              ))}
+            </div>
+          )}
+        </Section>
+
+        {/* ── ② Parameter 선택 ── */}
+        {stage === "select" && (
+          <Section title="② Parameter 선택">
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px", cursor: "pointer", fontWeight: 600, fontSize: "14px" }}>
+              <input type="checkbox" checked={selectedParams.length === allParams.length && allParams.length > 0}
+                onChange={() => setSelectedParams(selectedParams.length === allParams.length ? [] : [...allParams])}
+                style={{ width: "16px", height: "16px" }} />
+              전체 선택 ({allParams.length}개 parameter)
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: "5px", maxHeight: "300px", overflowY: "auto", border: "1px solid #e0e0e0", borderRadius: "8px", padding: "12px", background: "#fafafa" }}>
+              {allParams.map(p => (
+                <label key={p} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "12.5px", padding: "3px" }}>
+                  <input type="checkbox" checked={selectedParams.includes(p)}
+                    onChange={() => setSelectedParams(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p])} />
+                  <span title={`${p} [${getParamUnit(p)}]`} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {p}{getParamUnit(p) ? ` [${getParamUnit(p)}]` : ""}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div style={{ marginTop: "16px", display: "flex", gap: "12px", alignItems: "center" }}>
+              <button onClick={handleAnalyze} style={{ padding: "12px 36px", background: "#2E7D32", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "16px" }}>▶ 분석 시작</button>
+              <span style={{ fontSize: "13px", color: "#777" }}>{selectedParams.length}개 선택됨</span>
+            </div>
+          </Section>
+        )}
+
+        {/* ── ③ 차트 ── */}
+        {stage === "charts" && (
+          <div>
+            {/* 컨트롤바 */}
+            <div className="no-print" style={{ background: "white", borderRadius: "12px", padding: "14px 20px", marginBottom: "16px", boxShadow: "0 2px 8px rgba(0,0,0,0.07)", display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={doUndo} disabled={!undoStack.length} style={{ ...btnStyle(undoStack.length ? "#E65100" : "#ccc"), cursor: undoStack.length ? "pointer" : "default" }}>↩ 되돌리기</button>
+              <button onClick={() => setStage("select")} style={btnStyle("#546E7A")}>← Parameter 재선택</button>
+              <span style={{ fontSize: "11px", color: "#999" }}>점 클릭 → 색 변경/삭제 | 이상점 클릭 → 삭제 | 되돌리기로 복원 가능</span>
+            </div>
+
+            {/* Line Charts */}
+            <Section title="📈 Line Charts">
+              {selectedParams.map(param => {
+                const chartData = buildChartData(param);
+                const unit = getParamUnit(param);
+                const yDomain = getYDomain(param, chartData);
+                const r = yAxisRanges[param] || {};
+                return (
+                  <div key={param} className="chart-block" style={{ marginBottom: "28px", paddingBottom: "24px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", marginBottom: "6px" }}>
+                      <strong style={{ fontSize: "13.5px", color: "#222" }}>{param}{unit ? ` [${unit}]` : ""}</strong>
+                      <div className="no-print" style={{ display: "flex", gap: "6px", alignItems: "center", fontSize: "12px" }}>
+                        <span style={{ color: "#666" }}>Y축:</span>
+                        <input type="number" placeholder="Min" value={r.minInput ?? ""} onChange={e => setYAxisRanges(p => ({ ...p, [param]: { ...p[param], minInput: e.target.value } }))} style={{ width: "68px", padding: "3px 5px", border: "1px solid #ccc", borderRadius: "4px", fontSize: "12px" }} />
+                        <span style={{ color: "#aaa" }}>~</span>
+                        <input type="number" placeholder="Max" value={r.maxInput ?? ""} onChange={e => setYAxisRanges(p => ({ ...p, [param]: { ...p[param], maxInput: e.target.value } }))} style={{ width: "68px", padding: "3px 5px", border: "1px solid #ccc", borderRadius: "4px", fontSize: "12px" }} />
+                        <button onClick={() => { const rv = r; setYAxisRanges(p => ({ ...p, [param]: { ...rv, min: parseFloat(rv.minInput), max: parseFloat(rv.maxInput), custom: true } })); }} style={{ padding: "3px 9px", background: "#1976D2", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px" }}>적용</button>
+                        <button onClick={() => setYAxisRanges(p => ({ ...p, [param]: {} }))} style={{ padding: "3px 9px", background: "#757575", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px" }}>초기화</button>
+                      </div>
+                    </div>
+                    {/* 33cm × 4cm ≈ width: 100%, height: 170px */}
+                    <div style={{ width: "100%", height: "170px" }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={chartData} margin={{ top: 4, right: 28, bottom: 22, left: 48 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                          <XAxis dataKey="unit" tick={{ fontSize: 8.5 }}
+                            label={{ value: "Unit #", position: "insideBottom", offset: -10, fontSize: 10.5 }}
+                            tickFormatter={uid => {
+                              const allAxisDel = files.every((_, fi) => deletedPoints[`${fi}-${uid}`]?.deleteAxis);
+                              return allAxisDel ? "" : uid;
+                            }} />
+                          <YAxis domain={yDomain} tick={{ fontSize: 8.5 }}
+                            label={{ value: unit, angle: -90, position: "insideLeft", fontSize: 10, dx: -6 }} />
+                          <Tooltip formatter={(v, name) => { const fi = parseInt(name.replace("f", "")); return [typeof v === "number" ? v.toFixed(4) : v, files[fi]?.name || name]; }} />
+                          <Legend iconSize={9} wrapperStyle={{ fontSize: "10.5px" }} formatter={name => { const fi = parseInt(name.replace("f", "")); return files[fi]?.name || name; }} />
+                          {files.map((f, fi) => {
+                            const defColor = FILE_COLORS[fi % FILE_COLORS.length];
+                            return (
+                              <Line key={fi} type="linear" dataKey={`f${fi}`} stroke={defColor} strokeWidth={1.5}
+                                connectNulls={false} name={`f${fi}`}
+                                dot={(props) => {
+                                  const { cx, cy, payload } = props;
+                                  const uid = payload?.unit;
+                                  if (!uid || cx == null || cy == null || isNaN(cx) || isNaN(cy)) return null;
+                                  const key = `${fi}-${uid}`;
+                                  if (deletedPoints[key]) return null;
+                                  if (payload[`f${fi}`] === undefined) return null;
+                                  const dotColor = pointColors[key] || defColor;
+                                  return (
+                                    <circle key={key} cx={cx} cy={cy} r={4}
+                                      fill={dotColor} stroke="white" strokeWidth={1}
+                                      style={{ cursor: "pointer" }}
+                                      onClick={e => { e.stopPropagation(); setCtxMenu({ x: e.clientX + 8, y: e.clientY - 8, fi, uid, param }); setShowPalette(false); }} />
+                                  );
+                                }}
+                                activeDot={false} />
+                            );
+                          })}
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })}
+            </Section>
+
+            {/* Box Plots */}
+            <Section title="📦 Box Plots">
+              {selectedParams.map(param => {
+                const unit = getParamUnit(param);
+                return (
+                  <div key={param} className="chart-block" style={{ marginBottom: "32px", paddingBottom: "24px", borderBottom: "1px solid #f0f0f0" }}>
+                    <strong style={{ fontSize: "13.5px", color: "#222", display: "block", marginBottom: "10px" }}>
+                      {param}{unit ? ` [${unit}]` : ""}
+                    </strong>
+                    <div style={{ overflowX: "auto" }}>
+                      <MultiBoxPlot files={files} param={param} getBoxValues={getBoxValues} onDeleteOutlier={handleDeleteOutlier} />
+                    </div>
+                    <StatsTable files={files} param={param} getBoxValues={getBoxValues} />
+                  </div>
+                );
+              })}
+            </Section>
+
+            {/* PDF 저장 */}
+            <div className="no-print" style={{ textAlign: "center", padding: "24px 0 12px" }}>
+              <button onClick={() => window.print()} style={{ padding: "16px 52px", background: "#B71C1C", color: "white", border: "none", borderRadius: "10px", cursor: "pointer", fontSize: "17px", boxShadow: "0 6px 20px rgba(183,28,28,0.35)" }}>
+                📄 PDF로 저장
+              </button>
+              <p style={{ fontSize: "11px", color: "#bbb", marginTop: "8px" }}>브라우저 인쇄 창 → "PDF로 저장" 선택</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
